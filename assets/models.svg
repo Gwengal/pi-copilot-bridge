@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="300" viewBox="0 0 820 300" font-family="Cascadia Mono, Consolas, Menlo, monospace" font-size="14">
+  <rect width="820" height="300" rx="10" fill="#1e1e2e"/>
+  <text x="20" y="32" fill="#6c7086">/model   Scope: <tspan fill="#89b4fa">all</tspan> | scoped        search: copilot</text>
+  <text x="20" y="64" xml:space="preserve" fill="#cdd6f4"><tspan fill="#89b4fa">→ </tspan>auto                <tspan fill="#6c7086">Auto                               [copilot-bridge]</tspan></text>
+  <text x="20" y="88" xml:space="preserve" fill="#cdd6f4">  claude-haiku-5.5    <tspan fill="#6c7086">Claude Haiku 5.5 · 10/50 cr        [copilot-bridge]</tspan></text>
+  <text x="20" y="112" xml:space="preserve" fill="#cdd6f4">  claude-sonnet-5.5   <tspan fill="#6c7086">Claude Sonnet 5.5 · 200/1000 cr    [copilot-bridge]</tspan></text>
+  <text x="20" y="136" xml:space="preserve" fill="#cdd6f4">  claude-opus-5.5     <tspan fill="#6c7086">Claude Opus 5.5 · 400/2000 cr      [copilot-bridge]</tspan></text>
+  <text x="20" y="160" xml:space="preserve" fill="#cdd6f4">  gpt-6-luna          <tspan fill="#6c7086">GPT-6 Luna · 10/50 cr              [copilot-bridge]</tspan></text>
+  <text x="20" y="184" xml:space="preserve" fill="#cdd6f4">  gpt-6.2-sol         <tspan fill="#6c7086">GPT-6.2 Sol · 200/1000 cr          [copilot-bridge]</tspan></text>
+  <text x="20" y="208" xml:space="preserve" fill="#cdd6f4">  mai-code-2          <tspan fill="#6c7086">MAI Code 2 · 100/500 cr · -50%     [copilot-bridge]</tspan></text>
+  <line x1="20" y1="232" x2="800" y2="232" stroke="#45475a"/>
+  <text x="20" y="262" fill="#6c7086" xml:space="preserve">ctx <tspan fill="#89b4fa">━━━</tspan>───── 31% / 100k (auto) · 6↑ 118↓ · Cache 100%</text>
+  <text x="800" y="286" text-anchor="end" xml:space="preserve"><tspan fill="#9399b2">Premium </tspan><tspan fill="#a6e3a1">━━━━</tspan><tspan fill="#585b70">────────</tspan><tspan fill="#a6e3a1"> 37%</tspan><tspan fill="#6c7086"> 1,122/3,000 req · 0.424 credits</tspan></text>
+</svg>
