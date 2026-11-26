@@ -1,0 +1,69 @@
+{
+  "name": "pi-copilot-bridge",
+  "version": "0.1.0",
+  "description": "Use your GitHub Copilot subscription in the Pi coding agent through the official Copilot SDK",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "github-copilot",
+    "copilot-sdk",
+    "provider"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gwengal/pi-copilot-bridge.git"
+  },
+  "homepage": "https://github.com/Gwengal/pi-copilot-bridge#readme",
+  "bugs": "https://github.com/Gwengal/pi-copilot-bridge/issues",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "image": "https://raw.githubusercontent.com/Gwengal/pi-copilot-bridge/main/assets/models.png"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test",
+    "prepublishOnly": "npm run check && npm run build"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^1.6.1",
+    "@earendil-works/pi-coding-agent": "^1.6.1",
+    "@earendil-works/pi-tui": "^1.6.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.11",
+    "eslint": "^10.15.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.74.0",
+    "vitest": "^5.1.2"
+  },
+  "dependencies": {
+    "@microsoft/copilot-sdk": "^2.0.3"
+  }
+}
