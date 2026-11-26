@@ -76,13 +76,18 @@ function premiumWindow(snapshot: QuotaSnapshot, now: Date): LimitWindow {
  * Builds the pi-limits report for the premium-request quota.
  * Returns undefined without a snapshot. An unlimited entitlement, or a snapshot without a usable
  * percentage, yields a report without windows rather than a window showing NaN.
+ * The label names the account (`login`), so the footer shows whose quota it is.
  */
-export function quotaReport(snapshot: QuotaSnapshot | undefined, now: Date): LimitsReport | undefined {
+export function quotaReport(
+  snapshot: QuotaSnapshot | undefined,
+  now: Date,
+  login?: string,
+): LimitsReport | undefined {
   if (!snapshot) return undefined;
   const hasWindow = !snapshot.isUnlimitedEntitlement && Number.isFinite(snapshot.remainingPercentage);
   return {
     source: "copilot",
-    label: "Copilot",
+    label: login ? `Copilot · ${login}` : "Copilot",
     providers: [PROVIDER_ID],
     windows: hasWindow ? [premiumWindow(snapshot, now)] : [],
     observedAt: now.toISOString(),

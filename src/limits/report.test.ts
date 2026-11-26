@@ -17,6 +17,10 @@ describe("quotaReport", () => {
     expect(quotaReport(undefined, now)).toBeUndefined();
   });
 
+  it("names the account in the label", () => {
+    expect(quotaReport(snapshot, now, "octocat")?.label).toBe("Copilot · octocat");
+  });
+
   it("builds one premium window", () => {
     const report = quotaReport({ ...snapshot, resetDate: "2026-12-01T00:00:00Z" }, now);
     expect(report).toMatchObject({ source: "copilot", label: "Copilot", providers: ["copilot-bridge"] });

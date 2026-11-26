@@ -8,7 +8,7 @@ the runtime only sees Pi's tools, and Pi executes them.
 ## Facts verified against a real account (SDK 2.0.3, runtime 1.0.116)
 
 - **Login.** `new CopilotClient({ mode: "coding-agent", github: { useLoggedInUser: true } })` uses the
-  Copilot CLI login (`copilot` then `/login`), with tokens in the OS keychain. `mode: "empty"` does
+  shared Copilot login (from Pi's `/login` or the CLI, see below), i.e. the Copilot CLI login (`copilot` then `/login`), with tokens in the OS keychain. `mode: "empty"` does
   NOT pick up that login, even with the CLI's home directory, and requires `baseDirectory`.
   `client.getAuthStatus()` returns `{ isAuthenticated, login, statusMessage }`.
 - **Models.** `client.listModels()` returns ids like `claude-haiku-5.5`, `gpt-6-luna`, `auto`.
@@ -66,6 +66,51 @@ the runtime only sees Pi's tools, and Pi executes them.
 - **Session storage.** `client.stop()` keeps session data on disk for a later resume;
   `client.deleteSession(id)` removes it.
 
+## Login and the fallback catalog
+
+**Login inside Pi (experimental SDK API).** The provider registers Pi OAuth (`oauth` in
+`registerProvider`), so `/login` lists it as "GitHub Copilot (SDK)". The login runs the runtime's
+own interactive login, which the SDK marks `@experimental`. Verified with an empty `COPILOT_HOME`:
+
+- The `accounts.login` group (`list`, `begin`, `advance`, `cancel`) and `authProviders.list` exist
+  only on the **session** RPC (`session.rpc.accounts.login`), not on `client.rpc`.
+- They work unauthenticated: `client.start()` succeeds (`getAuthStatus()` →
+  `isAuthenticated: false`), `listModels()` fails ("Not authenticated"), but `createSession()`
+  without a model succeeds.
+- `authProviders.list()` → `gitHub` ("GitHub.com"), `gitHubEnterpriseCloud`, `entra` (unavailable).
+- `begin({ kind: "gitHub", method: "device-code" })` returns a `device-code` step (`userCode`
+  `XXXX-XXXX`, `verificationUri` `https://github.com/login/device`, `expiresIn` 899, `interval` 5).
+  One `advance` call polls until the user has authorized, then returns `completed` with
+  `result.login`. `method: "web"` returns an `open-url` step instead; the bridge uses device code
+  because it also works over SSH and Pi's login dialog shows it natively.
+
+`src/sdk/login.ts` runs that flow on a temporary client and session and maps the steps to Pi's
+callbacks (`onDeviceCode`, `onAuth`, `onPrompt`, `onSelect`); Pi's abort signal cancels the flow.
+The runtime stores the credential in the system keychain, as the CLI does. Pi stores only a
+placeholder (`access: "managed-by-copilot-runtime"`, far-future expiry), never a token; the stream
+function ignores Pi's credential. After the flow the bridge checks that the runtime is now
+authenticated, reloads the live model list and reports the login name. Logging out in Pi deletes
+only the placeholder; the Copilot login stays (log out with the Copilot CLI).
+
+The provider keeps its dummy API key: Pi lists models of a provider only when its auth resolves,
+and the models must be visible before the first login. As a side effect `/login` also offers
+"Sign in with an API key" for it, which has no effect.
+
+**Active account.** With an empty `COPILOT_HOME` the runtime still authenticates when the GitHub CLI
+is logged in (`getAuthStatus()` → `authType: "gh-cli"`), so a session can run on another account
+than expected. The runtime records `login` and `authType` at start; the bridge shows
+`Copilot account: <login> (<source>)` once per Pi session when a Copilot model is active or
+selected, and the pi-limits label reads `Copilot · <login>`. After `/login` the bridge disposes its
+SDK sessions and restarts the client, so the new account takes effect at once.
+**Fallback catalog.** `src/catalog/fallback-models.ts` is a snapshot of a live model list (ids,
+names, limits, efforts; no account data). It is registered when there is no model cache and the
+first live fetch fails (not logged in, offline). It is never written to the cache, so every start
+retries the live fetch, and a successful fetch (for example right after `/login`) replaces it.
+
+**Not logged in.** Using a model without a login fails with ``Not logged in to GitHub Copilot. Run /login and choose
+"GitHub Copilot (SDK)" (or run `npx @github/copilot` and /login).`` The same
+text is shown once as a warning at session start when a `copilot-bridge` model is active.
+
 ## How a Pi turn maps to the SDK
 
 Pi calls `streamSimple(model, context, options)` once per assistant message. The SDK runs its own
@@ -99,6 +144,21 @@ answered with an error without sending anything: Copilot would bill them as a fu
 the bridge recognises and answers by sending the last prompt again. Any other error marks the
 session broken, so the next call rebuilds. `errorType: "context_limit"` becomes an error message
 starting with `context_length_exceeded`, which makes Pi compact and retry.
+
+## Images in tool results
+
+A held handler returns Pi's tool result as the SDK's `ToolResultObject`. For a model whose catalog
+entry accepts images (`input` includes `"image"`), image blocks go in `binaryResultsForLlm`
+(`{ type: "image", data: <base64>, mimeType }`), with `[image attached]` in the text where the image
+was. The limits come from `capabilities.limits.vision` in `listModels` (`supported_media_types`,
+`max_prompt_images`, `max_prompt_image_size` in bytes) and are cached with the model list. The image
+count is shared by all tool results of one continuation, since they reach the model in one request.
+An image outside the limits becomes `[image omitted: <reason>]`; for a model without vision it is
+`[image omitted]`. The fallback catalog carries the limits of its snapshot; a cache without limits
+(written by an older version) applies none.
+
+Rebuild transcripts keep `[image]` placeholders; replaying earlier images is out of scope. The
+images of the newest prompt are sent as attachments.
 
 ## Session sync
 
@@ -137,17 +197,19 @@ bridge never resumes SDK sessions.
 
 ## Modules
 
-| File                      | Responsibility                                                                                                                                                                                                                                        |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/sdk/runtime.ts`      | Lazy, shared `CopilotClient`: start once, auth check with a clear "run `copilot` and `/login`" error, `listModels`, `getQuota`, stop on shutdown. Small interface so tests can fake it.                                                               |
-| `src/catalog/models.ts`   | SDK model → Pi model definition (id, name with price hint, context window = default price tier's `maxPromptTokens` so Pi compacts before long-context prices, max tokens, reasoning, input types, cost 0 because Copilot bills credits, not dollars). |
-| `src/catalog/effort.ts`   | Pi thinking level → SDK `reasoningEffort`, clamped to what the model lists; `undefined` when unsupported.                                                                                                                                             |
-| `src/limits/report.ts`    | Quota snapshot + session usage → `pi-limits:report:v1` payload (premium window, credits spent).                                                                                                                                                       |
-| `src/stream/translate.ts` | SDK session events → Pi assistant-message events for the current turn.                                                                                                                                                                                |
-| `src/stream/tools.ts`     | Pi tool declarations → SDK tools with held handlers; resolve/abort pending calls.                                                                                                                                                                     |
-| `src/session/sync.ts`     | Decide continue / send prompt / rebuild; serialize earlier transcript for a rebuild.                                                                                                                                                                  |
-| `src/session/turn.ts`     | `streamSimple` entry: ties runtime, sync, tools and translate together per Pi session.                                                                                                                                                                |
-| `src/index.ts`            | Extension entry: register the provider, refresh models, publish limits, clean up.                                                                                                                                                                     |
+| File                             | Responsibility                                                                                                                                                                                                                                        |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/sdk/runtime.ts`             | Lazy, shared `CopilotClient`: start once, auth check with a clear "not logged in" error, `listModels`, `getQuota`, stop on shutdown. Small interface so tests can fake it.                                                                            |
+| `src/sdk/login.ts`               | Pi `/login` flow on the runtime's experimental `accounts.login` API (device code); returns the placeholder credential.                                                                                                                                |
+| `src/catalog/fallback-models.ts` | Bundled model snapshot shown until the first successful live fetch.                                                                                                                                                                                   |
+| `src/catalog/models.ts`          | SDK model → Pi model definition (id, name with price hint, context window = default price tier's `maxPromptTokens` so Pi compacts before long-context prices, max tokens, reasoning, input types, cost 0 because Copilot bills credits, not dollars). |
+| `src/catalog/effort.ts`          | Pi thinking level → SDK `reasoningEffort`, clamped to what the model lists; `undefined` when unsupported.                                                                                                                                             |
+| `src/limits/report.ts`           | Quota snapshot + session usage → `pi-limits:report:v1` payload (premium window, credits spent).                                                                                                                                                       |
+| `src/stream/translate.ts`        | SDK session events → Pi assistant-message events for the current turn.                                                                                                                                                                                |
+| `src/stream/tools.ts`            | Pi tool declarations → SDK tools with held handlers; resolve/abort pending calls.                                                                                                                                                                     |
+| `src/session/sync.ts`            | Decide continue / send prompt / rebuild; serialize earlier transcript for a rebuild.                                                                                                                                                                  |
+| `src/session/turn.ts`            | `streamSimple` entry: ties runtime, sync, tools and translate together per Pi session.                                                                                                                                                                |
+| `src/index.ts`                   | Extension entry: register the provider (with OAuth login), refresh models, publish limits, clean up.                                                                                                                                                  |
 
 ## Rules
 

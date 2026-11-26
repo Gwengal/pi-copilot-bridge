@@ -1,29 +1,86 @@
 import type { Tool as PiTool, ToolResultMessage } from "@earendil-works/pi-ai";
 import { defineTool, type Tool as SdkTool, type ToolResultObject } from "@microsoft/copilot-sdk";
 
+/** Binary content of a tool result (the SDK does not export its name). */
+type ToolBinaryResult = NonNullable<ToolResultObject["binaryResultsForLlm"]>[number];
+
 /** A Pi tool result reduced to what the SDK handler hands back to the model. */
 export interface HeldToolResult {
   text: string;
   isError: boolean;
+  /** Images forwarded to the model with the text. */
+  images?: ToolBinaryResult[];
 }
 
-/** What a held handler returns to the SDK: plain text on success, a failure object otherwise. */
+/** Image limits of a vision model, from `capabilities.limits.vision`; each one is optional. */
+export interface VisionLimits {
+  supportedMediaTypes?: readonly string[];
+  maxImages?: number;
+  maxImageBytes?: number;
+}
+
+/** What a held handler returns to the SDK: plain text on success, a result object otherwise. */
 type SdkToolReturn = string | ToolResultObject;
 
-/** Placeholder for image blocks until image tool results are forwarded. */
+/** Note that replaces an image for a model without vision. */
 export const IMAGE_OMITTED = "[image omitted]";
 
-/** Converts a Pi tool-result message into the text the SDK handler returns. Images become a short note. */
-export function toHeldToolResult(message: ToolResultMessage): HeldToolResult {
-  const text = message.content
-    .map((block) => (block.type === "text" ? block.text : IMAGE_OMITTED))
-    .join("\n");
-  return { text, isError: message.isError };
+/**
+ * Converts the Pi tool-result messages of one continuation into what the SDK handlers return.
+ *
+ * With `vision` (the model accepts images), image blocks are forwarded as binary results, within the
+ * model's limits; `maxImages` counts across all results of the batch, since they reach the model in
+ * one request. An image outside the limits, or any image for a model without vision, becomes a short
+ * note in the text.
+ */
+export function toHeldToolResults(
+  messages: readonly ToolResultMessage[],
+  vision: VisionLimits | undefined,
+): HeldToolResult[] {
+  let imagesLeft = vision?.maxImages ?? Number.POSITIVE_INFINITY;
+  return messages.map((message) => {
+    const images: ToolBinaryResult[] = [];
+    const text = message.content
+      .map((block) => {
+        if (block.type === "text") return block.text;
+        if (!vision) return IMAGE_OMITTED;
+        const reason = rejectImage(block.mimeType, block.data, vision, imagesLeft);
+        if (reason) return `[image omitted: ${reason}]`;
+        imagesLeft--;
+        images.push({ type: "image", data: block.data, mimeType: block.mimeType });
+        return "[image attached]";
+      })
+      .join("\n");
+    return { text, isError: message.isError, ...(images.length > 0 ? { images } : {}) };
+  });
+}
+
+/** Why an image cannot be forwarded, or undefined when it can. */
+function rejectImage(
+  mimeType: string,
+  data: string,
+  vision: VisionLimits,
+  imagesLeft: number,
+): string | undefined {
+  const types = vision.supportedMediaTypes;
+  if (types && types.length > 0 && !types.includes(mimeType))
+    return `${mimeType} is not supported by this model`;
+  if (imagesLeft <= 0) return `limit of ${vision.maxImages} images per request reached`;
+  const bytes = Buffer.byteLength(data, "base64");
+  if (vision.maxImageBytes && bytes > vision.maxImageBytes) {
+    return `${bytes} bytes exceed the model's limit of ${vision.maxImageBytes} bytes`;
+  }
+  return undefined;
 }
 
 function toSdkReturn(result: HeldToolResult): SdkToolReturn {
-  if (!result.isError) return result.text;
-  return { textResultForLlm: result.text, resultType: "failure", error: result.text };
+  if (!result.isError && !result.images) return result.text;
+  return {
+    textResultForLlm: result.text,
+    resultType: result.isError ? "failure" : "success",
+    ...(result.isError ? { error: result.text } : {}),
+    ...(result.images ? { binaryResultsForLlm: result.images } : {}),
+  };
 }
 
 /**

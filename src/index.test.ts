@@ -1,19 +1,32 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { normalizeContext, type Api, type Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { normalizeContext, type Api, type Model, type OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
 import type { CopilotClient, CreateSessionOptions, SessionEvent } from "@microsoft/copilot-sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import piCopilotBridge, { PROVIDER_ID } from "./index.js";
+import { FALLBACK_MODELS } from "./catalog/fallback-models.js";
 import { LIMITS_REPORT_EVENT, type LimitsReport } from "./limits/report.js";
+import { MANAGED_CREDENTIAL } from "./sdk/login.js";
 import type { CopilotRuntime } from "./sdk/runtime.js";
 
 /** Every runtime the extension creates, with a fake client that never spawns a process. */
 const runtimes: { runtime: CopilotRuntime; stop: ReturnType<typeof vi.fn>; client: FakeClient }[] = [];
 
+/** Whether the fake runtime is logged in; the fake login flow switches it on. */
+const auth = vi.hoisted(() => ({ loggedIn: true }));
+
+vi.mock("./sdk/login.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./sdk/login.js")>()),
+  loginToCopilot: vi.fn(() => {
+    auth.loggedIn = true;
+    return Promise.resolve("octocat");
+  }),
+}));
+
 class FakeClient {
-  readonly listModels = vi.fn(() => Promise.resolve([]));
+  readonly listModels = vi.fn(() => Promise.resolve<unknown[]>([]));
   readonly rpc = {
     account: {
       getQuota: vi.fn(() =>
@@ -62,7 +75,12 @@ vi.mock("./sdk/runtime.js", async (importOriginal) => {
       const client = new FakeClient();
       const stop = vi.fn(() => Promise.resolve());
       const runtime: CopilotRuntime = {
-        client: () => Promise.resolve(client as unknown as CopilotClient),
+        client: () =>
+          auth.loggedIn
+            ? Promise.resolve(client as unknown as CopilotClient)
+            : Promise.reject(new original.CopilotAuthError(original.NOT_LOGGED_IN_MESSAGE)),
+        account: () => (auth.loggedIn ? { login: "octocat", authType: "gh-cli" } : undefined),
+        restart: () => Promise.resolve(),
         stop,
       };
       runtimes.push({ runtime, stop, client });
@@ -76,11 +94,11 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 /** A minimal ExtensionAPI: records handlers, registrations and emitted events. */
 function fakePi() {
   const handlers = new Map<string, Handler[]>();
-  const registered: { streamSimple: unknown }[] = [];
+  const registered: ProviderConfig[] = [];
   const reports: LimitsReport[] = [];
   const api = {
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
-    registerProvider: (_name: string, config: { streamSimple: unknown }) => registered.push(config),
+    registerProvider: (_name: string, config: ProviderConfig) => registered.push(config),
     events: {
       emit: (channel: string, data: unknown) =>
         channel === LIMITS_REPORT_EVENT && reports.push(data as LimitsReport),
@@ -119,6 +137,7 @@ beforeEach(() => {
   vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
   writeModelCache(new Date().toISOString());
   runtimes.length = 0;
+  auth.loggedIn = true;
 });
 
 afterEach(() => {
@@ -163,7 +182,11 @@ describe("piCopilotBridge limits", () => {
     await fire("session_start", {}, sessionCtx({ hasProvider: true, onCopilot: true }));
     await vi.waitFor(() => expect(reports).toHaveLength(1));
 
-    const streamSimple = registered[0]?.streamSimple as (m: Model<Api>, c: unknown, o: unknown) => unknown;
+    const streamSimple = registered[0]?.streamSimple as unknown as (
+      m: Model<Api>,
+      c: unknown,
+      o: unknown,
+    ) => unknown;
     const model = { id: "gpt-test", api: PROVIDER_ID, provider: PROVIDER_ID } as Model<Api>;
     const context = (text: string) =>
       normalizeContext({
@@ -190,6 +213,96 @@ describe("piCopilotBridge limits", () => {
     await piCopilotBridge(pi);
     await fire("session_start", {}, sessionCtx({ hasProvider: true }));
     await vi.waitFor(() => expect(runtimes[0]?.client.listModels).toHaveBeenCalled());
+    await fire("session_shutdown", {});
+  });
+});
+
+describe("piCopilotBridge account notice", () => {
+  it("names the account and its source once per Pi session, and in the limits label", async () => {
+    const { pi, fire, reports } = fakePi();
+    await piCopilotBridge(pi);
+    const ctx = sessionCtx({ hasProvider: true, onCopilot: true });
+    await fire("session_start", {}, ctx);
+    await fire("model_select", { model: { provider: PROVIDER_ID } }, ctx);
+    await vi.waitFor(() => expect(ctx.ui.notify).toHaveBeenCalled());
+    await vi.waitFor(() => expect(reports.length).toBeGreaterThan(0));
+    expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Copilot account: octocat (GitHub CLI)", "info");
+    expect(reports[0]?.label).toBe("Copilot · octocat");
+    await fire("session_shutdown", {});
+  });
+});
+
+describe("piCopilotBridge without a Copilot login", () => {
+  const cachePath = () => join(agentDir, "copilot-bridge", "models.json");
+  const liveModel = { id: "live-model", name: "Live", capabilities: { supports: {}, limits: {} } };
+
+  beforeEach(() => {
+    rmSync(cachePath());
+    auth.loggedIn = false;
+  });
+
+  it("registers the bundled fallback models and does not cache them", async () => {
+    const { pi, fire, registered } = fakePi();
+    await piCopilotBridge(pi);
+    expect(registered[0]?.models?.map((model) => model.id)).toEqual(FALLBACK_MODELS.map((model) => model.id));
+    expect(registered[0]?.name).toBe("GitHub Copilot (SDK)");
+    expect(existsSync(cachePath())).toBe(false);
+    await fire("session_shutdown", {});
+  });
+
+  it("keeps the fallback models when the runtime lists no models", async () => {
+    auth.loggedIn = true; // the fake client lists [] by default
+    const { pi, fire, registered } = fakePi();
+    await piCopilotBridge(pi);
+    expect(registered).toHaveLength(1);
+    expect(registered[0]?.models).toHaveLength(FALLBACK_MODELS.length);
+    expect(existsSync(cachePath())).toBe(false);
+    await fire("session_shutdown", {});
+  });
+
+  it("warns once at session start when a Copilot model is active", async () => {
+    const { pi, fire } = fakePi();
+    await piCopilotBridge(pi);
+    const ctx = sessionCtx({ hasProvider: true, onCopilot: true });
+    await fire("session_start", {}, ctx);
+    await fire("session_start", {}, ctx);
+    await vi.waitFor(() => expect(ctx.ui.notify).toHaveBeenCalled());
+    expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining('choose "GitHub Copilot (SDK)"'),
+      "warning",
+    );
+
+    const other = sessionCtx({ hasProvider: true });
+    await fire("session_start", {}, other);
+    expect(other.ui.notify).not.toHaveBeenCalled();
+    await fire("session_shutdown", {});
+  });
+
+  it("logs in through /login, loads live models and stores no token in Pi", async () => {
+    const { pi, fire, registered } = fakePi();
+    await piCopilotBridge(pi);
+    const ctx = sessionCtx({ hasProvider: true });
+    await fire("session_start", {}, ctx);
+    runtimes[0]?.client.listModels.mockResolvedValue([liveModel]);
+
+    const credential = await registered[0].oauth!.login({} as OAuthLoginCallbacks);
+
+    expect(credential).toEqual(MANAGED_CREDENTIAL);
+    expect(JSON.stringify(credential)).not.toMatch(/gh[opsu]_|token/i);
+    expect(registered.at(-1)?.models?.map((model) => model.id)).toEqual(["live-model"]);
+    expect(existsSync(cachePath())).toBe(true);
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Logged in to GitHub Copilot as octocat.", "info");
+    await fire("session_shutdown", {});
+  });
+
+  it("fails the login when the account still cannot use Copilot", async () => {
+    const { loginToCopilot } = await import("./sdk/login.js");
+    vi.mocked(loginToCopilot).mockResolvedValueOnce("octocat"); // flow succeeds, runtime stays logged out
+    const { pi, fire, registered } = fakePi();
+    await piCopilotBridge(pi);
+    await expect(registered[0].oauth!.login({} as OAuthLoginCallbacks)).rejects.toThrow("Not logged in");
     await fire("session_shutdown", {});
   });
 });

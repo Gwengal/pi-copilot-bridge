@@ -327,6 +327,45 @@ describe("streamSimple: held tool calls", () => {
   });
 });
 
+describe("streamSimple: images in tool results", () => {
+  const screenshot: Message = {
+    role: "toolResult",
+    toolCallId: "c1",
+    toolName: "read",
+    content: [{ type: "image", data: "AAAA", mimeType: "image/png" }],
+    isError: false,
+    timestamp: 0,
+  };
+
+  async function handlerResultFor(model: Model<Api>, overrides: Partial<TurnDependencies> = {}) {
+    const harness = setup(overrides);
+    const history: Message[] = [user("look")];
+    const first = harness.bridge.streamSimple(model, context(history), options);
+    await settle();
+    const session = harness.sessions[0];
+    session.requestTools(["c1"]);
+    const toolUse = await first.result();
+    const handlerResult = session.callTool("read", "c1");
+    harness.bridge.streamSimple(model, context([...history, toolUse, screenshot]), options);
+    return handlerResult;
+  }
+
+  it("forwards them to a vision model within its limits", async () => {
+    const result = await handlerResultFor(testModel(), {
+      visionLimits: () => ({ supportedMediaTypes: ["image/png"], maxImages: 5 }),
+    });
+    expect(result).toMatchObject({
+      resultType: "success",
+      binaryResultsForLlm: [{ type: "image", data: "AAAA", mimeType: "image/png" }],
+    });
+  });
+
+  it("replaces them with a note for a model without vision", async () => {
+    const textOnly = { ...testModel(), input: ["text"] as Model<Api>["input"] };
+    await expect(handlerResultFor(textOnly)).resolves.toBe("[image omitted]");
+  });
+});
+
 describe("streamSimple: abort", () => {
   it("aborts mid-turn: SDK abort, aborted result, later events ignored", async () => {
     const harness = setup();

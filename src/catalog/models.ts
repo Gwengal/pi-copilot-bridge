@@ -1,5 +1,6 @@
 import type { Model } from "@microsoft/copilot-sdk";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { VisionLimits } from "../stream/tools.js";
 
 /** Provider id under which the models appear in Pi, e.g. `copilot-bridge/claude-haiku-5.5`. */
 export const PROVIDER_ID = "copilot-bridge";
@@ -61,4 +62,22 @@ export function toPiModels(sdkModels: readonly Model[]): PiModelDefinition[] {
 /** Reasoning efforts each model accepts, keyed by model id (empty array: no effort setting). */
 export function supportedEffortsById(sdkModels: readonly Model[]): Map<string, readonly string[]> {
   return new Map(sdkModels.map((model) => [model.id, model.supportedReasoningEfforts ?? []]));
+}
+
+/** Image limits of each vision model, keyed by model id; models without vision are left out. */
+export function visionLimitsById(sdkModels: readonly Model[]): Map<string, VisionLimits> {
+  const entries: [string, VisionLimits][] = [];
+  for (const model of sdkModels) {
+    if (!model.capabilities.supports?.vision) continue;
+    const limits = model.capabilities.limits?.vision;
+    entries.push([
+      model.id,
+      {
+        ...(limits?.supported_media_types ? { supportedMediaTypes: limits.supported_media_types } : {}),
+        ...(limits?.max_prompt_images ? { maxImages: limits.max_prompt_images } : {}),
+        ...(limits?.max_prompt_image_size ? { maxImageBytes: limits.max_prompt_image_size } : {}),
+      },
+    ]);
+  }
+  return new Map(entries);
 }

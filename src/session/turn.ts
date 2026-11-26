@@ -24,7 +24,7 @@ import {
   type SessionRecord,
   type SyncDecision,
 } from "./sync.js";
-import { HeldToolCalls, toHeldToolResult } from "../stream/tools.js";
+import { HeldToolCalls, toHeldToolResults, type VisionLimits } from "../stream/tools.js";
 import { PiTurnWriter } from "../stream/translate.js";
 
 /** Services `streamSimple` needs; injected so tests can fake the SDK. */
@@ -32,6 +32,8 @@ export interface TurnDependencies {
   runtime: CopilotRuntime;
   /** Allowed reasoning efforts for a Copilot model id, from listModels. */
   supportedEfforts(modelId: string): readonly string[] | undefined;
+  /** Image limits of a Copilot model id, from listModels; only asked for models that accept images. */
+  visionLimits?(modelId: string): VisionLimits | undefined;
   /**
    * Called after each SDK usage checkpoint with what the Pi session has spent so far, summed over
    * all SDK sessions that served it (rebuilds and one-off summary sessions included).
@@ -342,7 +344,12 @@ export function createStreamSimple(deps: TurnDependencies): CopilotStreaming {
     for (const steering of decision.steering) {
       await owner.session.send(await payloadFor(turn, { ...toMessageOptions(steering), mode: "immediate" }));
     }
-    for (const result of decision.results) owner.tools.resolve(result.toolCallId, toHeldToolResult(result));
+    // Models that accept images get them; limits unknown (e.g. an older cache) means none apply.
+    const vision = turn.model.input.includes("image")
+      ? (deps.visionLimits?.(turn.model.id) ?? {})
+      : undefined;
+    const held = toHeldToolResults(decision.results, vision);
+    decision.results.forEach((result, index) => owner.tools.resolve(result.toolCallId, held[index]));
     await reportResponse(turn);
     turn.writer.start();
   }

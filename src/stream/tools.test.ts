@@ -1,7 +1,7 @@
 import type { Tool as PiTool, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { Tool as SdkTool, ToolInvocation } from "@microsoft/copilot-sdk";
 import { describe, expect, it, vi } from "vitest";
-import { HeldToolCalls, IMAGE_OMITTED, toHeldToolResult } from "./tools.js";
+import { HeldToolCalls, IMAGE_OMITTED, toHeldToolResults } from "./tools.js";
 
 const readTool: PiTool = {
   name: "read",
@@ -120,20 +120,68 @@ describe("HeldToolCalls handlers", () => {
   });
 });
 
-describe("toHeldToolResult", () => {
-  it("joins text blocks and replaces images with a note", () => {
-    const message: ToolResultMessage = {
-      role: "toolResult",
-      toolCallId: "call-1",
-      toolName: "read",
-      content: [
-        { type: "text", text: "line 1" },
-        { type: "image", data: "AAAA", mimeType: "image/png" },
-        { type: "text", text: "line 2" },
-      ],
+describe("toHeldToolResults", () => {
+  const png = (data = "AAAA") => ({ type: "image" as const, data, mimeType: "image/png" });
+  const result = (content: ToolResultMessage["content"], toolCallId = "call-1"): ToolResultMessage => ({
+    role: "toolResult",
+    toolCallId,
+    toolName: "read",
+    content,
+    isError: false,
+    timestamp: 0,
+  });
+
+  it("replaces images with a note for a model without vision", () => {
+    const message = result([{ type: "text", text: "line 1" }, png(), { type: "text", text: "line 2" }]);
+    expect(toHeldToolResults([message], undefined)).toEqual([
+      { text: `line 1\n${IMAGE_OMITTED}\nline 2`, isError: false },
+    ]);
+  });
+
+  it("forwards images as binary results to a vision model", () => {
+    const [held] = toHeldToolResults([result([{ type: "text", text: "shot" }, png()])], {});
+    expect(held).toEqual({
+      text: "shot\n[image attached]",
       isError: false,
-      timestamp: 0,
-    };
-    expect(toHeldToolResult(message)).toEqual({ text: `line 1\n${IMAGE_OMITTED}\nline 2`, isError: false });
+      images: [{ type: "image", data: "AAAA", mimeType: "image/png" }],
+    });
+  });
+
+  it("notes unsupported types and oversized images instead of forwarding them", () => {
+    const gif = { type: "image" as const, data: "AAAA", mimeType: "image/gif" };
+    const big = png("A".repeat(8)); // 6 bytes
+    const [held] = toHeldToolResults([result([gif, big])], {
+      supportedMediaTypes: ["image/png", "image/jpeg"],
+      maxImageBytes: 5,
+    });
+    expect(held?.images).toBeUndefined();
+    expect(held?.text).toBe(
+      "[image omitted: image/gif is not supported by this model]\n" +
+        "[image omitted: 6 bytes exceed the model's limit of 5 bytes]",
+    );
+  });
+
+  it("caps images across all results of one batch", () => {
+    const held = toHeldToolResults([result([png(), png()], "a"), result([png()], "b")], { maxImages: 2 });
+    expect(held.map((entry) => entry.images?.length ?? 0)).toEqual([2, 0]);
+    expect(held[1]?.text).toBe("[image omitted: limit of 2 images per request reached]");
+  });
+});
+
+describe("HeldToolCalls with images", () => {
+  it("returns a success object with binary results to the SDK", async () => {
+    const calls = new HeldToolCalls();
+    const [tool] = calls.createTools([readTool]);
+    const pending = invoke(tool, "call-1");
+    calls.resolve("call-1", {
+      text: "[image attached]",
+      isError: false,
+      images: [{ type: "image", data: "AAAA", mimeType: "image/png" }],
+    });
+    await expect(pending).resolves.toEqual({
+      textResultForLlm: "[image attached]",
+      resultType: "success",
+      binaryResultsForLlm: [{ type: "image", data: "AAAA", mimeType: "image/png" }],
+    });
   });
 });

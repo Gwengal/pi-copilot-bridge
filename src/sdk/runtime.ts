@@ -10,12 +10,38 @@ export type PremiumQuotaSnapshot = NonNullable<
 export interface CopilotRuntime {
   /** Started, authenticated SDK client. Rejects with {@link CopilotAuthError} when not logged in. */
   client(): Promise<CopilotClient>;
+  /** Account the started client is signed in with; undefined before a successful start. */
+  account?(): CopilotAccount | undefined;
+  /** Stops the current client so the next `client()` starts a new one, e.g. after a login. */
+  restart?(): Promise<void>;
   /**
    * Stops the client if it was started. Final: afterwards `client()` rejects instead of starting a
    * new process, so late background work during shutdown cannot revive the runtime. A reload or
    * new session creates a new runtime.
    */
   stop(): Promise<void>;
+}
+
+/** The GitHub account the runtime uses, as `getAuthStatus()` reports it. */
+export interface CopilotAccount {
+  login?: string;
+  /** How the runtime found the credential, e.g. "user" or "gh-cli". */
+  authType?: string;
+}
+
+/** Where a credential came from, for people (SDK `authType`; unknown values pass through). */
+const AUTH_SOURCES: Record<string, string> = {
+  user: "Copilot CLI / Pi login",
+  "gh-cli": "GitHub CLI",
+  env: "COPILOT_GITHUB_TOKEN/GH_TOKEN",
+  token: "GitHub token",
+};
+
+/** "octocat (GitHub CLI)": the account and where its credential came from. */
+export function describeAccount(account: CopilotAccount): string {
+  const source = account.authType ? (AUTH_SOURCES[account.authType] ?? account.authType) : undefined;
+  const login = account.login ?? "unknown account";
+  return source ? `${login} (${source})` : login;
 }
 
 /** The user is not logged in to GitHub Copilot; the message tells them how to fix it. */
@@ -32,21 +58,31 @@ export interface CopilotRuntimeOptions {
   createClient?: () => CopilotClient;
 }
 
-// "coding-agent" is required: mode "empty" ignores the Copilot CLI login (see ARCHITECTURE.md).
-function createDefaultClient(): CopilotClient {
+/** Name of the provider's login entry in Pi's `/login` list. */
+export const LOGIN_PROVIDER_NAME = "GitHub Copilot (SDK)";
+
+/** Shown wherever a Copilot model is used without a Copilot login. */
+export const NOT_LOGGED_IN_MESSAGE =
+  `Not logged in to GitHub Copilot. Run /login and choose "${LOGIN_PROVIDER_NAME}" ` +
+  "(or run `npx @github/copilot` and /login).";
+
+/**
+ * Creates an SDK client on the shared Copilot login (keychain, `COPILOT_HOME`).
+ * "coding-agent" is required: mode "empty" ignores the Copilot CLI login (see ARCHITECTURE.md).
+ */
+export function createCopilotClient(): CopilotClient {
   return new CopilotClient({ mode: "coding-agent", github: { useLoggedInUser: true } });
 }
 
-function notLoggedInMessage(login: string | undefined): string {
-  const who = login ? ` (login: ${login})` : "";
-  return `GitHub Copilot is not logged in${who}. Run \`npx @github/copilot\`, then \`/login\`.`;
-}
-
-async function startAuthenticated(client: CopilotClient): Promise<CopilotClient> {
+async function startAuthenticated(
+  client: CopilotClient,
+  onAccount: (account: CopilotAccount) => void,
+): Promise<CopilotClient> {
   try {
     await client.start();
     const auth = await client.getAuthStatus();
-    if (!auth.isAuthenticated) throw new CopilotAuthError(notLoggedInMessage(auth.login));
+    if (!auth.isAuthenticated) throw new CopilotAuthError(NOT_LOGGED_IN_MESSAGE);
+    onAccount({ login: auth.login, authType: auth.authType });
     return client;
   } catch (error) {
     await client.stop().catch(() => undefined); // do not leak a half-started runtime process
@@ -59,21 +95,30 @@ async function startAuthenticated(client: CopilotClient): Promise<CopilotClient>
  * a failed start is not cached, so the next call retries (for example after the user logged in).
  */
 export function createCopilotRuntime(options: CopilotRuntimeOptions = {}): CopilotRuntime {
-  const createClient = options.createClient ?? createDefaultClient;
+  const createClient = options.createClient ?? createCopilotClient;
   let starting: Promise<CopilotClient> | undefined;
   let stopped = false;
+  let account: CopilotAccount | undefined;
 
   return {
     client() {
       if (stopped) return Promise.reject(new Error("The Copilot runtime was stopped."));
       if (!starting) {
-        const attempt = startAuthenticated(createClient());
+        const attempt = startAuthenticated(createClient(), (found) => (account = found));
         starting = attempt;
         attempt.catch(() => {
           if (starting === attempt) starting = undefined;
         });
       }
       return starting;
+    },
+    account: () => account,
+    async restart() {
+      const running = starting;
+      starting = undefined;
+      account = undefined;
+      const client = await running?.catch(() => undefined);
+      await client?.stop();
     },
     async stop() {
       stopped = true;

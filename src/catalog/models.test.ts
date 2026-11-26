@@ -1,6 +1,6 @@
 import type { Model } from "@microsoft/copilot-sdk";
 import { describe, expect, it } from "vitest";
-import { supportedEffortsById, toPiModels } from "./models.js";
+import { supportedEffortsById, toPiModels, visionLimitsById } from "./models.js";
 
 const haiku: Model = {
   id: "claude-haiku-5.5",
@@ -101,5 +101,29 @@ describe("supportedEffortsById", () => {
     const map = supportedEffortsById([luna, auto]);
     expect(map.get("gpt-6-luna")).toEqual(["none", "low", "medium", "high", "xhigh"]);
     expect(map.get("auto")).toEqual([]);
+  });
+});
+
+describe("visionLimitsById", () => {
+  it("keeps the vision limits of vision models and skips the others", () => {
+    const withLimits: Model = {
+      ...haiku,
+      capabilities: {
+        ...haiku.capabilities,
+        limits: {
+          vision: {
+            supported_media_types: ["image/png"],
+            max_prompt_images: 5,
+            max_prompt_image_size: 3_145_728,
+          },
+        },
+      },
+    };
+    expect(visionLimitsById([withLimits, luna, auto])).toEqual(
+      new Map([
+        ["claude-haiku-5.5", { supportedMediaTypes: ["image/png"], maxImages: 5, maxImageBytes: 3_145_728 }],
+        ["auto", {}],
+      ]),
+    );
   });
 });
