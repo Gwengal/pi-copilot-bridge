@@ -23,7 +23,7 @@ permission requests from the runtime are rejected.
 ## Install
 
 ```sh
-pi install npm:pi-copilot-bridge
+pi install npm:@gwengal/pi-copilot-bridge
 ```
 
 In Pi: `/login` → "GitHub Copilot (SDK)" (device code in the browser). Alternatively log in with the

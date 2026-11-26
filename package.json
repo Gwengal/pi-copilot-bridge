@@ -1,5 +1,5 @@
 {
-  "name": "pi-copilot-bridge",
+  "name": "@gwengal/pi-copilot-bridge",
   "version": "0.1.0",
   "description": "Use your GitHub Copilot subscription in the Pi coding agent through the official Copilot SDK",
   "keywords": [
