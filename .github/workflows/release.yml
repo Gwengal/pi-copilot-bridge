@@ -4,8 +4,9 @@ on:
   push:
     tags: ["v*"]
 
-# Publishing uses npm trusted publishing (OIDC), so no NPM_TOKEN secret is needed.
-# The trusted publisher must be configured for this package on npmjs.com first.
+# Releases are staged through npm trusted publishing (OIDC), so no NPM_TOKEN secret is needed.
+# A maintainer approves the staged version on npmjs.com (Staged Packages) or with `npm stage approve`.
+# The trusted publisher must be configured for this package on npmjs.com first; provenance is automatic.
 permissions:
   id-token: write
   contents: read
@@ -20,7 +21,9 @@ jobs:
           node-version: 24
           cache: npm
           registry-url: https://registry.npmjs.org
+      # Staged publishing needs npm 11.15 or newer.
+      - run: npm install -g npm@latest
       - run: npm ci
       - run: npm run check
       - run: npm run build
-      - run: npm publish --provenance --access public
+      - run: npm stage publish --access public
